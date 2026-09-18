@@ -1,4 +1,6 @@
-python-telegram-bot>=22.0
-python-dotenv>=1.0
-httpx>=0.27.0
-qrcode[pil]>=8.0
+python-telegram-bot
+python-dotenv
+httpx
+qrcode[pil]
+fastapi
+uvicorn[standard]
