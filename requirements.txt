@@ -1,6 +1,6 @@
-python-telegram-bot
-python-dotenv
-httpx
-qrcode[pil]
+python-telegram-bot>=22.8
+python-dotenv>=1.0
+httpx>=0.27
 fastapi
 uvicorn[standard]
+qrcode[pil]

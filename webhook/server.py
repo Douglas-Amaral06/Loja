@@ -1,10 +1,16 @@
 import os
 import json
 import hmac
+import time
+import asyncio
 import hashlib
 import logging
 
-from contextlib import asynccontextmanager
+from decimal import Decimal
+
+from contextlib import (
+    asynccontextmanager,
+)
 
 from dotenv import load_dotenv
 
@@ -15,15 +21,16 @@ from fastapi import (
 )
 
 from telegram import Update
+
+from telegram.constants import (
+    ParseMode,
+)
+
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
 )
-
-# ============================================================
-# IMPORTAR FUNÇÕES DO BOT
-# ============================================================
 
 from bot import (
     start,
@@ -32,17 +39,20 @@ from bot import (
     error_handler,
 )
 
+from database.db import (
+    init_db,
+    processar_pagamento_webhook,
+    decimal_para_centavos,
+    formatar_centavos,
+)
+
 
 # ============================================================
-# CARREGAR ENV
+# ENV
 # ============================================================
 
 load_dotenv()
 
-
-# ============================================================
-# TELEGRAM
-# ============================================================
 
 TELEGRAM_BOT_TOKEN = os.getenv(
     "TELEGRAM_BOT_TOKEN"
@@ -55,11 +65,6 @@ TELEGRAM_WEBHOOK_URL = os.getenv(
 TELEGRAM_WEBHOOK_SECRET = os.getenv(
     "TELEGRAM_WEBHOOK_SECRET"
 )
-
-
-# ============================================================
-# DOMINIPAY
-# ============================================================
 
 DOMINIPAY_WEBHOOK_SECRET = os.getenv(
     "DOMINIPAY_WEBHOOK_SECRET"
@@ -77,6 +82,7 @@ logging.basicConfig(
         "%(levelname)s - "
         "%(message)s"
     ),
+
     level=logging.INFO,
 )
 
@@ -84,32 +90,39 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# VALIDAR VARIÁVEIS IMPORTANTES
+# VALIDAR ENV
 # ============================================================
 
 if not TELEGRAM_BOT_TOKEN:
+
     raise RuntimeError(
         "TELEGRAM_BOT_TOKEN não configurado."
     )
 
 
 if not TELEGRAM_WEBHOOK_URL:
+
     raise RuntimeError(
         "TELEGRAM_WEBHOOK_URL não configurado."
     )
 
 
 if not TELEGRAM_WEBHOOK_SECRET:
+
     raise RuntimeError(
         "TELEGRAM_WEBHOOK_SECRET não configurado."
     )
 
 
+if not DOMINIPAY_WEBHOOK_SECRET:
+
+    raise RuntimeError(
+        "DOMINIPAY_WEBHOOK_SECRET não configurado."
+    )
+
+
 # ============================================================
-# CRIAR APLICAÇÃO DO TELEGRAM
-#
-# updater(None) porque NÃO usaremos polling.
-# O FastAPI receberá as mensagens.
+# TELEGRAM APP
 # ============================================================
 
 telegram_app = (
@@ -120,10 +133,6 @@ telegram_app = (
     .build()
 )
 
-
-# ============================================================
-# HANDLERS DO TELEGRAM
-# ============================================================
 
 telegram_app.add_handler(
     CommandHandler(
@@ -154,81 +163,60 @@ telegram_app.add_error_handler(
 
 
 # ============================================================
-# STARTUP / SHUTDOWN
+# STARTUP
 # ============================================================
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(
+    app: FastAPI
+):
 
-    # ========================================================
-    # INICIALIZAR TELEGRAM
-    # ========================================================
+    init_db()
+
 
     logger.info(
-        "Inicializando Telegram Bot..."
+        "Inicializando Telegram..."
     )
+
 
     await telegram_app.initialize()
 
 
-    # ========================================================
-    # CONFIGURAR WEBHOOK DO TELEGRAM
-    # ========================================================
-
-    webhook_result = (
+    resultado = (
         await telegram_app.bot.set_webhook(
             url=TELEGRAM_WEBHOOK_URL,
-            allowed_updates=Update.ALL_TYPES,
-            secret_token=TELEGRAM_WEBHOOK_SECRET,
+
+            allowed_updates=(
+                Update.ALL_TYPES
+            ),
+
+            secret_token=(
+                TELEGRAM_WEBHOOK_SECRET
+            ),
         )
     )
 
 
     logger.info(
-        "Webhook Telegram configurado: %s",
-        webhook_result,
+        "Telegram webhook: %s",
+        resultado,
     )
 
-    logger.info(
-        "Telegram Webhook URL: %s",
-        TELEGRAM_WEBHOOK_URL,
-    )
-
-
-    # ========================================================
-    # INICIAR PROCESSAMENTO DE UPDATES
-    # ========================================================
 
     await telegram_app.start()
 
 
     logger.info(
-        "🤖 Telegram Bot iniciado."
+        "🤖 Telegram online."
     )
 
     logger.info(
-        "🌐 FastAPI iniciado."
+        "💰 DominiPay webhook online."
     )
 
-    logger.info(
-        "💰 DominiPay Webhook preparado."
-    )
-
-
-    # ========================================================
-    # SERVIDOR RODANDO
-    # ========================================================
 
     yield
 
-
-    # ========================================================
-    # DESLIGAMENTO
-    # ========================================================
-
-    logger.info(
-        "Encerrando Telegram Bot..."
-    )
 
     await telegram_app.stop()
 
@@ -241,7 +229,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="CHAPELEIRO7STORE API",
+
     version="1.0.0",
+
     lifespan=lifespan,
 )
 
@@ -255,28 +245,32 @@ async def home():
 
     return {
         "status": "online",
-        "service": "CHAPELEIRO7STORE",
-        "telegram": "/telegram/webhook",
-        "dominipay": "/webhooks/dominipay",
+
+        "service":
+            "CHAPELEIRO7STORE",
+
+        "telegram":
+            "/telegram/webhook",
+
+        "dominipay":
+            "/webhooks/dominipay",
     }
 
 
 # ============================================================
-# HEALTH CHECK
+# HEALTH
 # ============================================================
 
 @app.get("/health")
 async def health():
 
     return {
-        "status": "ok",
-        "telegram": "online",
-        "dominipay": "online",
+        "status": "ok"
     }
 
 
 # ============================================================
-# WEBHOOK DO TELEGRAM
+# TELEGRAM WEBHOOK
 # ============================================================
 
 @app.post("/telegram/webhook")
@@ -284,48 +278,33 @@ async def telegram_webhook(
     request: Request
 ):
 
-    # ========================================================
-    # VALIDAR SEGREDO DO TELEGRAM
-    # ========================================================
-
-    secret_recebido = request.headers.get(
-        "X-Telegram-Bot-Api-Secret-Token"
+    secret_recebido = (
+        request.headers.get(
+            "X-Telegram-Bot-Api-Secret-Token"
+        )
     )
 
 
     if not secret_recebido:
 
-        logger.warning(
-            "Webhook Telegram sem secret."
-        )
-
         raise HTTPException(
             status_code=401,
+
             detail="Telegram secret ausente",
         )
 
 
-    secret_valido = hmac.compare_digest(
+    if not hmac.compare_digest(
         secret_recebido,
         TELEGRAM_WEBHOOK_SECRET,
-    )
-
-
-    if not secret_valido:
-
-        logger.warning(
-            "Webhook Telegram com secret inválido."
-        )
+    ):
 
         raise HTTPException(
             status_code=401,
+
             detail="Telegram secret inválido",
         )
 
-
-    # ========================================================
-    # PEGAR JSON DO TELEGRAM
-    # ========================================================
 
     try:
 
@@ -335,23 +314,17 @@ async def telegram_webhook(
 
         raise HTTPException(
             status_code=400,
+
             detail="JSON inválido",
         )
 
 
-    # ========================================================
-    # CONVERTER JSON PARA UPDATE DO TELEGRAM
-    # ========================================================
-
     update = Update.de_json(
         data=data,
+
         bot=telegram_app.bot,
     )
 
-
-    # ========================================================
-    # COLOCAR NA FILA DO BOT
-    # ========================================================
 
     await telegram_app.update_queue.put(
         update
@@ -364,28 +337,49 @@ async def telegram_webhook(
 
 
 # ============================================================
-# VALIDAR ASSINATURA DOMINIPAY
+# VALIDAR DOMINIPAY
 # ============================================================
 
 def validar_assinatura_dominipay(
     raw_body: bytes,
     timestamp: str,
     signature: str,
-) -> bool:
+):
 
-    if not DOMINIPAY_WEBHOOK_SECRET:
+    try:
 
-        logger.error(
-            "DOMINIPAY_WEBHOOK_SECRET "
-            "não configurado."
+        timestamp_int = int(
+            timestamp
+        )
+
+    except ValueError:
+
+        return False
+
+
+    # ========================================================
+    # BLOQUEIA REPLAY ANTIGO
+    #
+    # Aceitamos no máximo 5 minutos de diferença.
+    # ========================================================
+
+    agora = int(
+        time.time()
+    )
+
+
+    if abs(
+        agora - timestamp_int
+    ) > 300:
+
+        logger.warning(
+            "Webhook DominiPay expirado."
         )
 
         return False
 
 
     # ========================================================
-    # FORMATO DA DOMINIPAY:
-    #
     # timestamp.rawBody
     # ========================================================
 
@@ -400,7 +394,9 @@ def validar_assinatura_dominipay(
         DOMINIPAY_WEBHOOK_SECRET.encode(
             "utf-8"
         ),
+
         signed_payload,
+
         hashlib.sha256,
     ).hexdigest()
 
@@ -412,7 +408,7 @@ def validar_assinatura_dominipay(
 
 
 # ============================================================
-# WEBHOOK DOMINIPAY
+# DOMINIPAY WEBHOOK
 # ============================================================
 
 @app.post("/webhooks/dominipay")
@@ -421,14 +417,14 @@ async def dominipay_webhook(
 ):
 
     # ========================================================
-    # PEGAR BODY CRU
+    # BODY CRU
     # ========================================================
 
     raw_body = await request.body()
 
 
     # ========================================================
-    # HEADERS DOMINIPAY
+    # HEADERS
     # ========================================================
 
     signature = request.headers.get(
@@ -444,14 +440,11 @@ async def dominipay_webhook(
     )
 
 
-    # ========================================================
-    # VALIDAR HEADERS
-    # ========================================================
-
     if not signature:
 
         raise HTTPException(
             status_code=400,
+
             detail=(
                 "X-Webhook-Signature ausente"
             ),
@@ -462,6 +455,7 @@ async def dominipay_webhook(
 
         raise HTTPException(
             status_code=400,
+
             detail=(
                 "X-Webhook-Timestamp ausente"
             ),
@@ -469,33 +463,28 @@ async def dominipay_webhook(
 
 
     # ========================================================
-    # VALIDAR ASSINATURA
+    # ASSINATURA
     # ========================================================
 
-    assinatura_valida = (
-        validar_assinatura_dominipay(
-            raw_body=raw_body,
-            timestamp=timestamp,
-            signature=signature,
-        )
-    )
+    if not validar_assinatura_dominipay(
+        raw_body=raw_body,
 
+        timestamp=timestamp,
 
-    if not assinatura_valida:
-
-        logger.warning(
-            "Webhook DominiPay "
-            "com assinatura inválida."
-        )
+        signature=signature,
+    ):
 
         raise HTTPException(
             status_code=401,
-            detail="Assinatura inválida",
+
+            detail=(
+                "Assinatura inválida"
+            ),
         )
 
 
     # ========================================================
-    # AGORA SIM TRANSFORMAR EM JSON
+    # JSON
     # ========================================================
 
     try:
@@ -508,12 +497,13 @@ async def dominipay_webhook(
 
         raise HTTPException(
             status_code=400,
+
             detail="JSON inválido",
         )
 
 
     # ========================================================
-    # DADOS DOMINIPAY
+    # CAMPOS
     # ========================================================
 
     evento = payload.get(
@@ -524,9 +514,12 @@ async def dominipay_webhook(
         "id"
     )
 
-    status = payload.get(
-        "status"
-    )
+    status = str(
+        payload.get(
+            "status",
+            ""
+        )
+    ).lower()
 
     previous_status = payload.get(
         "previousStatus"
@@ -536,60 +529,19 @@ async def dominipay_webhook(
         "amount"
     )
 
-    observation = payload.get(
-        "observation"
-    )
-
-
-    # ========================================================
-    # LOG
-    # ========================================================
 
     logger.info(
-        "========================================"
-    )
-
-    logger.info(
-        "💰 WEBHOOK DOMINIPAY"
-    )
-
-    logger.info(
-        "Evento: %s",
+        "DominiPay | "
+        "event=%s | "
+        "id=%s | "
+        "status=%s | "
+        "previous=%s | "
+        "amount=%s",
         evento,
-    )
-
-    logger.info(
-        "Pagamento: %s",
         payment_id,
-    )
-
-    logger.info(
-        "Status: %s",
         status,
-    )
-
-    logger.info(
-        "Anterior: %s",
         previous_status,
-    )
-
-    logger.info(
-        "Valor: %s",
         amount,
-    )
-
-    logger.info(
-        "Observation: %s",
-        observation,
-    )
-
-    logger.info(
-        "Event ID: %s",
-        event_id,
-    )
-
-    logger.info(
-        "========================================"
     )
 
 
@@ -599,59 +551,159 @@ async def dominipay_webhook(
 
     if evento == "payment.created":
 
-        logger.info(
-            "💰 Pagamento criado: %s",
-            payment_id,
-        )
+        return {
+            "received": True
+        }
 
 
     # ========================================================
     # STATUS ALTERADO
     # ========================================================
 
-    elif evento == "payment.status_changed":
+    if evento != "payment.status_changed":
 
-        logger.info(
-            "Pagamento %s: %s → %s",
-            payment_id,
-            previous_status,
-            status,
+        return {
+            "received": True
+        }
+
+
+    if not payment_id:
+
+        raise HTTPException(
+            status_code=400,
+
+            detail="Pagamento sem ID",
         )
 
 
+    # ========================================================
+    # VALOR RECEBIDO
+    # ========================================================
+
+    webhook_amount_cents = None
+
+
+    if amount is not None:
+
+        try:
+
+            webhook_amount_cents = (
+                decimal_para_centavos(
+                    Decimal(
+                        str(amount)
+                    )
+                )
+            )
+
+        except Exception:
+
+            logger.warning(
+                "Valor inválido no webhook."
+            )
+
+
+    # ========================================================
+    # PROCESSAR NO SQLITE
+    #
+    # Rodamos em outra thread para não bloquear FastAPI.
+    # ========================================================
+
+    resultado = await asyncio.to_thread(
+        processar_pagamento_webhook,
+
+        payment_id,
+
+        status,
+
+        event_id,
+
+        webhook_amount_cents,
+    )
+
+
+    action = resultado.get(
+        "action"
+    )
+
+
+    logger.info(
+        "Resultado pagamento %s: %s",
+        payment_id,
+        action,
+    )
+
+
+    # ========================================================
+    # CRÉDITO REALIZADO
+    # ========================================================
+
+    if action == "credited":
+
+        telegram_id = resultado[
+            "telegram_id"
+        ]
+
+        amount_cents = resultado[
+            "amount_cents"
+        ]
+
+        balance_cents = resultado[
+            "balance_cents"
+        ]
+
+
         # ====================================================
-        # PAGAMENTO APROVADO
+        # AVISAR USUÁRIO
         # ====================================================
 
-        if status == "approved":
+        try:
 
-            logger.info(
-                "✅ PAGAMENTO APROVADO!"
+            await telegram_app.bot.send_message(
+                chat_id=telegram_id,
+
+                text=(
+                    "✅ <b>Pagamento confirmado!</b>\n\n"
+
+                    f"💰 Valor recebido: "
+                    f"<b>{formatar_centavos(amount_cents)}</b>\n"
+
+                    f"💎 Saldo adicionado: "
+                    f"<b>{formatar_centavos(amount_cents)}</b>\n\n"
+
+                    f"💳 Seu saldo atual é: "
+                    f"<b>{formatar_centavos(balance_cents)}</b>"
+                ),
+
+                parse_mode=ParseMode.HTML,
             )
 
-            logger.info(
-                "Pagamento: %s",
-                payment_id,
+
+        except Exception:
+
+            logger.exception(
+                "Não foi possível avisar "
+                "o usuário no Telegram."
             )
 
-            logger.info(
-                "Valor: R$ %s",
-                amount,
-            )
 
+    # ========================================================
+    # DIFERENÇA DE VALOR
+    # ========================================================
 
-            # ================================================
-            # PRÓXIMA ETAPA:
-            #
-            # buscar payment_id no SQLite
-            # descobrir telegram_id
-            # creditar saldo
-            # avisar usuário
-            # ================================================
+    elif action == "amount_mismatch":
+
+        logger.error(
+            "VALOR DIVERGENTE! "
+            "Pagamento=%s | "
+            "esperado=%s | recebido=%s",
+            payment_id,
+            resultado.get("expected"),
+            resultado.get("received"),
+        )
 
 
     return {
         "received": True,
-        "event": evento,
-        "payment_id": payment_id,
+
+        "action": action,
     }

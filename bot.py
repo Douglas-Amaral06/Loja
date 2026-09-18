@@ -1,15 +1,30 @@
 import os
+import html
+import base64
 import logging
+
+from io import BytesIO
+
+from decimal import (
+    Decimal,
+    InvalidOperation,
+)
+
+import qrcode
 
 from dotenv import load_dotenv
 
 from telegram import (
     Update,
+    InputFile,
+    CopyTextButton,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
 
-from telegram.constants import ParseMode
+from telegram.constants import (
+    ParseMode,
+)
 
 from telegram.ext import (
     ApplicationBuilder,
@@ -18,14 +33,30 @@ from telegram.ext import (
     ContextTypes,
 )
 
+from services.pix_service import (
+    criar_pagamento_pix,
+    DominipayError,
+)
+
+from database.db import (
+    init_db,
+    registrar_usuario,
+    obter_saldo,
+    registrar_pagamento_pix,
+    decimal_para_centavos,
+    formatar_centavos,
+)
+
 
 # ============================================================
-# VARIÁVEIS DE AMBIENTE
+# ENV
 # ============================================================
 
 load_dotenv()
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN"
+)
 
 
 # ============================================================
@@ -33,7 +64,12 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 # ============================================================
 
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format=(
+        "%(asctime)s - "
+        "%(name)s - "
+        "%(levelname)s - "
+        "%(message)s"
+    ),
     level=logging.INFO,
 )
 
@@ -41,18 +77,41 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
+# PIX
+# ============================================================
+
+PIX_MINIMO = Decimal(
+    "10.00"
+)
+
+
+# ============================================================
 # CALLBACKS
 # ============================================================
 
 CALLBACK_MENU = "menu"
+
 CALLBACK_PERFIL = "perfil"
-CALLBACK_SALDO = "adicionar_saldo"
 
-CALLBACK_PIX = "pix_automatico"
-CALLBACK_RECARGA_MANUAL = "recarga_manual"
+CALLBACK_SALDO = (
+    "adicionar_saldo"
+)
 
-CALLBACK_VOLTAR = "voltar_inicio"
-CALLBACK_VOLTAR_SALDO = "voltar_saldo"
+CALLBACK_PIX = (
+    "pix_automatico"
+)
+
+CALLBACK_RECARGA_MANUAL = (
+    "recarga_manual"
+)
+
+CALLBACK_VOLTAR = (
+    "voltar_inicio"
+)
+
+CALLBACK_VOLTAR_SALDO = (
+    "voltar_saldo"
+)
 
 
 # ============================================================
@@ -64,17 +123,19 @@ TECLADO_PRINCIPAL = InlineKeyboardMarkup(
         [
             InlineKeyboardButton(
                 "🛒 Menu",
-                callback_data=CALLBACK_MENU
+                callback_data=CALLBACK_MENU,
             ),
+
             InlineKeyboardButton(
                 "💎 Seu Perfil",
-                callback_data=CALLBACK_PERFIL
+                callback_data=CALLBACK_PERFIL,
             ),
         ],
+
         [
             InlineKeyboardButton(
                 "💰 Adiciona Saldo",
-                callback_data=CALLBACK_SALDO
+                callback_data=CALLBACK_SALDO,
             )
         ],
     ]
@@ -82,33 +143,39 @@ TECLADO_PRINCIPAL = InlineKeyboardMarkup(
 
 
 # ============================================================
-# TECLADO ADICIONAR SALDO
+# TECLADO SALDO
 # ============================================================
 
-TECLADO_ADICIONAR_SALDO = InlineKeyboardMarkup(
-    [
+TECLADO_ADICIONAR_SALDO = (
+    InlineKeyboardMarkup(
         [
-            InlineKeyboardButton(
-                "💠 Pix automático",
-                callback_data=CALLBACK_PIX
-            ),
-            InlineKeyboardButton(
-                "💵 Recarga manual",
-                callback_data=CALLBACK_RECARGA_MANUAL
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "« volta",
-                callback_data=CALLBACK_VOLTAR
-            )
-        ],
-    ]
+            [
+                InlineKeyboardButton(
+                    "💠 Pix automático",
+                    callback_data=CALLBACK_PIX,
+                ),
+
+                InlineKeyboardButton(
+                    "💵 Recarga manual",
+                    callback_data=(
+                        CALLBACK_RECARGA_MANUAL
+                    ),
+                ),
+            ],
+
+            [
+                InlineKeyboardButton(
+                    "« volta",
+                    callback_data=CALLBACK_VOLTAR,
+                )
+            ],
+        ]
+    )
 )
 
 
 # ============================================================
-# TECLADO VOLTAR AO MENU PRINCIPAL
+# VOLTAR
 # ============================================================
 
 TECLADO_VOLTAR = InlineKeyboardMarkup(
@@ -116,49 +183,59 @@ TECLADO_VOLTAR = InlineKeyboardMarkup(
         [
             InlineKeyboardButton(
                 "« volta",
-                callback_data=CALLBACK_VOLTAR
+                callback_data=CALLBACK_VOLTAR,
             )
         ]
     ]
 )
 
 
-# ============================================================
-# TECLADO VOLTAR PARA ADICIONAR SALDO
-# ============================================================
-
-TECLADO_VOLTAR_SALDO = InlineKeyboardMarkup(
-    [
+TECLADO_VOLTAR_SALDO = (
+    InlineKeyboardMarkup(
         [
-            InlineKeyboardButton(
-                "« volta",
-                callback_data=CALLBACK_VOLTAR_SALDO
-            )
+            [
+                InlineKeyboardButton(
+                    "« volta",
+                    callback_data=(
+                        CALLBACK_VOLTAR_SALDO
+                    ),
+                )
+            ]
         ]
-    ]
+    )
 )
 
 
 # ============================================================
-# TEXTO PRINCIPAL
+# TEXTO START
 # ============================================================
 
-def gerar_texto_inicio(user_name: str):
+def gerar_texto_inicio(
+    user_name: str
+):
+
+    nome = html.escape(
+        user_name
+    )
 
     return (
-        f"👋 Fala, <b>{user_name}</b>! Seja muito bem-vindo(a).\n\n"
+        f"👋 Fala, <b>{nome}</b>! "
+        "Seja muito bem-vindo(a).\n\n"
 
-        "🎩 <b>CHAPELEIRO7STORE — A EXCELÊNCIA EM DIGITAL</b> 🚀\n\n"
+        "🎩 <b>CHAPELEIRO7STORE — "
+        "A EXCELÊNCIA EM DIGITAL</b> 🚀\n\n"
 
         "⭐ Operando com alta performance no mercado\n"
         "🥇 Referência em automação e atendimento no Telegram\n"
         "🔒 Padrão de qualidade exclusivo direto da administração\n\n"
 
         "⚡ <b>DIFERENCIAIS DA CASA:</b>\n"
+
         "• Sistema de pagamentos instantâneo via PIX\n"
         "• Processamento automatizado 24/7\n\n"
 
         "📌 <b>DIRETRIZES E TERMOS:</b>\n"
+
         "⚠️ Saldo adicionado não é reembolsável\n"
         "⚠️ Segurança e proteção antifraude ativas\n"
         "⚠️ Tentativas de fraude resultam em BAN imediato\n"
@@ -167,6 +244,7 @@ def gerar_texto_inicio(user_name: str):
         "⚠️ Janela de suporte/troca via bot: até 5 minutos\n\n"
 
         "⏱️ <b>SUPORTE E GARANTIA:</b>\n"
+
         "🛡️ Validação automatizada ativa\n"
         "📞 Atendimento exclusivamente pelos canais oficiais\n\n"
 
@@ -175,12 +253,14 @@ def gerar_texto_inicio(user_name: str):
         "📞 Suporte: @CHAPELEIROSTORESUPORTE01\n\n"
 
         "💼 Atitude de profissional.\n"
-        "🔥 <b>Bem-vindo ao topo. Seja Chapeleiro7Store.</b>"
+
+        "🔥 <b>Bem-vindo ao topo. "
+        "Seja Chapeleiro7Store.</b>"
     )
 
 
 # ============================================================
-# TEXTO ADICIONAR SALDO
+# TEXTO SALDO
 # ============================================================
 
 def gerar_texto_adicionar_saldo():
@@ -189,11 +269,177 @@ def gerar_texto_adicionar_saldo():
         "💰 <b><u>Adicione saldo na STORE</u></b>\n\n"
 
         "<i>"
-        "Você pode adicionar saldo na store via pix de forma "
-        "automática ou por recarga manual comprando diretamente "
-        "com um dos admins."
+        "Você pode adicionar saldo na store via PIX "
+        "de forma automática ou por recarga manual "
+        "comprando diretamente com um dos admins."
         "</i>"
     )
+
+
+# ============================================================
+# TEXTO /PIX
+# ============================================================
+
+def gerar_texto_instrucao_pix():
+
+    return (
+        "✨ <b>Adição de saldo via pix</b>\n\n"
+
+        "<i>"
+        "Tornou-se mais fácil! Agora os seus pagamentos "
+        "serão processados de forma automática pelo bot. 😜"
+        "</i>\n\n"
+
+        "<b>Para criar uma transação pelo bot use:</b>\n"
+
+        "<code>/pix valor</code>\n\n"
+
+        "<b>Exemplo:</b> "
+        "<code>/pix 20</code>\n\n"
+
+        "💰 Valor mínimo: <b>R$ 10,00</b>\n\n"
+
+        "<i>"
+        "✅ O seu saldo estará disponível após "
+        "a confirmação do pagamento."
+        "</i>"
+    )
+
+
+# ============================================================
+# CONVERTER VALOR
+# ============================================================
+
+def converter_valor_pix(
+    texto: str
+):
+
+    texto = (
+        texto
+        .strip()
+        .replace("R$", "")
+        .replace(" ", "")
+        .replace(",", ".")
+    )
+
+
+    try:
+
+        valor = Decimal(
+            texto
+        )
+
+    except InvalidOperation:
+
+        return None
+
+
+    if not valor.is_finite():
+
+        return None
+
+
+    if valor <= 0:
+
+        return None
+
+
+    # Máximo 2 casas decimais
+    if abs(
+        valor.as_tuple().exponent
+    ) > 2:
+
+        return None
+
+
+    return valor.quantize(
+        Decimal("0.01")
+    )
+
+
+# ============================================================
+# QR CODE LOCAL
+# ============================================================
+
+def gerar_qrcode_local(
+    codigo_pix: str
+):
+
+    qr = qrcode.QRCode(
+        version=None,
+
+        error_correction=(
+            qrcode.constants.ERROR_CORRECT_M
+        ),
+
+        box_size=10,
+
+        border=4,
+    )
+
+
+    qr.add_data(
+        codigo_pix
+    )
+
+
+    qr.make(
+        fit=True
+    )
+
+
+    imagem = qr.make_image()
+
+
+    arquivo = BytesIO()
+
+
+    imagem.save(
+        arquivo,
+        format="PNG"
+    )
+
+
+    arquivo.seek(0)
+
+    arquivo.name = "pix.png"
+
+
+    return arquivo
+
+
+# ============================================================
+# DECODIFICAR QR BASE64
+# ============================================================
+
+def decodificar_qr_base64(
+    valor: str
+):
+
+    if "," in valor:
+
+        valor = valor.split(
+            ",",
+            1
+        )[1]
+
+
+    dados = base64.b64decode(
+        valor
+    )
+
+
+    arquivo = BytesIO(
+        dados
+    )
+
+
+    arquivo.seek(0)
+
+    arquivo.name = "pix.png"
+
+
+    return arquivo
 
 
 # ============================================================
@@ -207,21 +453,35 @@ async def start(
 
     user = update.effective_user
 
-    user_name = (
-        user.first_name
-        if user and user.first_name
-        else "CHAPELEIRO"
+
+    registrar_usuario(
+        telegram_id=user.id,
+
+        username=user.username,
+
+        first_name=user.first_name,
     )
 
+
+    nome = (
+        user.first_name
+        or "CHAPELEIRO"
+    )
+
+
     await update.message.reply_text(
-        text=gerar_texto_inicio(user_name),
+        text=gerar_texto_inicio(
+            nome
+        ),
+
         parse_mode=ParseMode.HTML,
+
         reply_markup=TECLADO_PRINCIPAL,
     )
 
 
 # ============================================================
-# CALLBACK DOS BOTÕES
+# CALLBACK
 # ============================================================
 
 async def handle_callback(
@@ -231,50 +491,61 @@ async def handle_callback(
 
     query = update.callback_query
 
-    # Remove o "loading" do botão
     await query.answer()
 
-    data = query.data
 
     user = query.from_user
 
-    user_name = (
-        user.first_name
-        if user and user.first_name
-        else "CHAPELEIRO"
+    data = query.data
+
+
+    registrar_usuario(
+        telegram_id=user.id,
+
+        username=user.username,
+
+        first_name=user.first_name,
     )
 
-    logger.info(
-        "Usuário %s clicou em %s",
-        user.id,
-        data,
+
+    nome = (
+        user.first_name
+        or "CHAPELEIRO"
     )
 
 
     # ========================================================
-    # ADICIONAR SALDO
+    # SALDO
     # ========================================================
 
     if data == CALLBACK_SALDO:
 
         await query.edit_message_text(
             text=gerar_texto_adicionar_saldo(),
+
             parse_mode=ParseMode.HTML,
-            reply_markup=TECLADO_ADICIONAR_SALDO,
+
+            reply_markup=(
+                TECLADO_ADICIONAR_SALDO
+            ),
         )
 
         return
 
 
     # ========================================================
-    # VOLTAR PARA O INÍCIO
+    # VOLTAR
     # ========================================================
 
     if data == CALLBACK_VOLTAR:
 
         await query.edit_message_text(
-            text=gerar_texto_inicio(user_name),
+            text=gerar_texto_inicio(
+                nome
+            ),
+
             parse_mode=ParseMode.HTML,
+
             reply_markup=TECLADO_PRINCIPAL,
         )
 
@@ -287,17 +558,16 @@ async def handle_callback(
 
     if data == CALLBACK_MENU:
 
-        texto = (
-            "🛒 <b>Catálogo de Produtos</b>\n\n"
-
-            "Selecione uma categoria ou produto disponível.\n\n"
-
-            "🚧 O catálogo será configurado em breve."
-        )
-
         await query.edit_message_text(
-            text=texto,
+            text=(
+                "🛒 <b>Catálogo de Produtos</b>\n\n"
+
+                "🚧 O catálogo será configurado "
+                "em breve."
+            ),
+
             parse_mode=ParseMode.HTML,
+
             reply_markup=TECLADO_VOLTAR,
         )
 
@@ -310,22 +580,27 @@ async def handle_callback(
 
     if data == CALLBACK_PERFIL:
 
-        # Depois vamos puxar isso diretamente do SQLite
-        saldo = 0.00
-
-        texto = (
-            "💎 <b>Seu Perfil</b>\n\n"
-
-            f"👤 Nome: <b>{user.first_name}</b>\n"
-            f"🆔 ID: <code>{user.id}</code>\n"
-            f"💰 Saldo: <b>R$ {saldo:.2f}</b>\n\n"
-
-            "📦 Compras realizadas: <b>0</b>"
+        saldo = obter_saldo(
+            user.id
         )
 
+
         await query.edit_message_text(
-            text=texto,
+            text=(
+                "💎 <b>Seu Perfil</b>\n\n"
+
+                f"👤 Nome: "
+                f"<b>{html.escape(nome)}</b>\n"
+
+                f"🆔 ID: "
+                f"<code>{user.id}</code>\n"
+
+                f"💰 Saldo: "
+                f"<b>{formatar_centavos(saldo)}</b>"
+            ),
+
             parse_mode=ParseMode.HTML,
+
             reply_markup=TECLADO_VOLTAR,
         )
 
@@ -333,30 +608,16 @@ async def handle_callback(
 
 
     # ========================================================
-    # PIX AUTOMÁTICO
+    # PIX
     # ========================================================
 
     if data == CALLBACK_PIX:
 
-        texto = (
-            "💠 <b>PIX Automático</b>\n\n"
-
-            "💰 Adicione saldo automaticamente através do PIX.\n\n"
-
-            "Digite o valor desejado utilizando:\n\n"
-
-            "<code>/pix 50</code>\n\n"
-
-            "Exemplo acima:\n"
-            "Adicionar <b>R$ 50,00</b> de saldo.\n\n"
-
-            "⚡ Após a confirmação do pagamento, "
-            "o saldo será adicionado automaticamente."
-        )
-
         await query.edit_message_text(
-            text=texto,
+            text=gerar_texto_instrucao_pix(),
+
             parse_mode=ParseMode.HTML,
+
             reply_markup=TECLADO_VOLTAR_SALDO,
         )
 
@@ -369,19 +630,18 @@ async def handle_callback(
 
     if data == CALLBACK_RECARGA_MANUAL:
 
-        texto = (
-            "💵 <b>Recarga Manual</b>\n\n"
-
-            "Para adicionar saldo manualmente, entre em contato "
-            "com um dos administradores.\n\n"
-
-            "📞 <b>Suporte oficial:</b>\n"
-            "@CHAPELEIROSTORESUPORTE01"
-        )
-
         await query.edit_message_text(
-            text=texto,
+            text=(
+                "💵 <b>Recarga Manual</b>\n\n"
+
+                "Para realizar uma recarga manual, "
+                "entre em contato com o suporte.\n\n"
+
+                "📞 @CHAPELEIROSTORESUPORTE01"
+            ),
+
             parse_mode=ParseMode.HTML,
+
             reply_markup=TECLADO_VOLTAR_SALDO,
         )
 
@@ -389,15 +649,19 @@ async def handle_callback(
 
 
     # ========================================================
-    # VOLTAR PARA ADICIONAR SALDO
+    # VOLTAR SALDO
     # ========================================================
 
     if data == CALLBACK_VOLTAR_SALDO:
 
         await query.edit_message_text(
             text=gerar_texto_adicionar_saldo(),
+
             parse_mode=ParseMode.HTML,
-            reply_markup=TECLADO_ADICIONAR_SALDO,
+
+            reply_markup=(
+                TECLADO_ADICIONAR_SALDO
+            ),
         )
 
         return
@@ -412,21 +676,27 @@ async def pix(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
+    user = update.effective_user
+
+
+    registrar_usuario(
+        telegram_id=user.id,
+
+        username=user.username,
+
+        first_name=user.first_name,
+    )
+
+
     # ========================================================
-    # NÃO INFORMOU VALOR
+    # SÓ /PIX
     # ========================================================
 
     if not context.args:
 
         await update.message.reply_text(
-            text=(
-                "💠 <b>Gerar PIX</b>\n\n"
+            text=gerar_texto_instrucao_pix(),
 
-                "Informe o valor que deseja adicionar.\n\n"
-
-                "Exemplo:\n"
-                "<code>/pix 50</code>"
-            ),
             parse_mode=ParseMode.HTML,
         )
 
@@ -434,33 +704,144 @@ async def pix(
 
 
     # ========================================================
-    # NORMALIZAR VALOR
+    # FORMATO
     # ========================================================
 
-    valor_texto = context.args[0]
+    if len(context.args) != 1:
 
-    valor_texto = valor_texto.replace(",", ".")
+        await update.message.reply_text(
+            text=(
+                "❌ <b>Formato inválido.</b>\n\n"
+
+                "Use:\n"
+
+                "<code>/pix valor</code>\n\n"
+
+                "Exemplo:\n"
+
+                "<code>/pix 20</code>"
+            ),
+
+            parse_mode=ParseMode.HTML,
+        )
+
+        return
+
+
+    valor = converter_valor_pix(
+        context.args[0]
+    )
 
 
     # ========================================================
-    # VALIDAR NÚMERO
+    # VALOR INVÁLIDO
+    # ========================================================
+
+    if valor is None:
+
+        await update.message.reply_text(
+            text=(
+                "❌ <b>Valor inválido.</b>\n\n"
+
+                "Exemplo correto:\n"
+
+                "<code>/pix 20</code>"
+            ),
+
+            parse_mode=ParseMode.HTML,
+        )
+
+        return
+
+
+    # ========================================================
+    # MÍNIMO R$10
+    # ========================================================
+
+    if valor < PIX_MINIMO:
+
+        await update.message.reply_text(
+            text=(
+                "❌ <b>Valor abaixo do mínimo.</b>\n\n"
+
+                "O valor mínimo para adicionar saldo "
+                "via PIX é <b>R$ 10,00</b>.\n\n"
+
+                "Exemplo:\n"
+
+                "<code>/pix 10</code>"
+            ),
+
+            parse_mode=ParseMode.HTML,
+        )
+
+        return
+
+
+    # ========================================================
+    # CARREGANDO
+    # ========================================================
+
+    mensagem_carregando = (
+        await update.message.reply_text(
+            text=(
+                "⏳ <b>Gerando seu PIX...</b>\n\n"
+
+                f"💰 Valor: "
+                f"<b>R$ {valor:.2f}</b>"
+            ),
+
+            parse_mode=ParseMode.HTML,
+        )
+    )
+
+
+    # ========================================================
+    # CRIAR DOMINIPAY
     # ========================================================
 
     try:
 
-        valor = float(valor_texto)
+        pagamento = await criar_pagamento_pix(
+            valor=valor,
+            telegram_id=user.id,
+        )
 
-    except ValueError:
 
-        await update.message.reply_text(
+    except DominipayError as erro:
+
+        logger.error(
+            "Erro DominiPay: %s",
+            erro,
+        )
+
+
+        await mensagem_carregando.edit_text(
             text=(
-                "❌ <b>Valor inválido.</b>\n\n"
+                "❌ <b>Não foi possível gerar "
+                "o PIX.</b>\n\n"
 
-                "Use apenas números.\n\n"
-
-                "Exemplo:\n"
-                "<code>/pix 50</code>"
+                "Tente novamente em alguns instantes."
             ),
+
+            parse_mode=ParseMode.HTML,
+        )
+
+        return
+
+
+    except Exception:
+
+        logger.exception(
+            "Erro inesperado no /pix."
+        )
+
+
+        await mensagem_carregando.edit_text(
+            text=(
+                "❌ <b>Erro interno ao gerar PIX.</b>"
+            ),
+
             parse_mode=ParseMode.HTML,
         )
 
@@ -468,51 +849,195 @@ async def pix(
 
 
     # ========================================================
-    # VALIDAR VALOR
+    # SALVAR PAGAMENTO
     # ========================================================
 
-    if valor <= 0:
+    payment_id = pagamento["id"]
 
-        await update.message.reply_text(
-            text=(
-                "❌ <b>Valor inválido.</b>\n\n"
-
-                "O valor precisa ser maior que R$ 0,00."
-            ),
-            parse_mode=ParseMode.HTML,
-        )
-
-        return
+    status = pagamento["status"]
 
 
-    # ========================================================
-    # FUTURA INTEGRAÇÃO COM O GATEWAY
-    # ========================================================
-    #
-    # Aqui depois teremos algo como:
-    #
-    # pagamento = gateway.criar_pix(
-    #     telegram_id=update.effective_user.id,
-    #     valor=valor
-    # )
-    #
-    # pix_copia_cola = pagamento["pix"]
-    # qr_code = pagamento["qr_code"]
-    # transaction_id = pagamento["id"]
-    #
-    # ========================================================
+    registrar_pagamento_pix(
+        dominipay_id=payment_id,
 
+        telegram_id=user.id,
 
-    await update.message.reply_text(
-        text=(
-            "💠 <b>Solicitação PIX</b>\n\n"
-
-            f"💰 Valor: <b>R$ {valor:.2f}</b>\n\n"
-
-            "🚧 Gateway de pagamentos ainda não conectado."
+        amount_cents=(
+            decimal_para_centavos(
+                valor
+            )
         ),
-        parse_mode=ParseMode.HTML,
+
+        status=status,
     )
+
+
+    # ========================================================
+    # PEGAR QR
+    # ========================================================
+
+    qr_copy_paste = pagamento.get(
+        "qrCopyPaste"
+    )
+
+    qr_base64 = pagamento.get(
+        "qrCodeBase64"
+    )
+
+    qr_url = pagamento.get(
+        "qrCodeUrl"
+    )
+
+
+    # ========================================================
+    # REMOVER "GERANDO"
+    # ========================================================
+
+    try:
+
+        await mensagem_carregando.delete()
+
+    except Exception:
+
+        pass
+
+
+    # ========================================================
+    # LEGENDA
+    # ========================================================
+
+    valor_formatado = (
+        f"{valor:.2f}"
+        .replace(".", ",")
+    )
+
+
+    legenda = (
+        "✅ <b>PIX criado com sucesso!</b>\n\n"
+
+        f"💰 Valor: "
+        f"<b>R$ {valor_formatado}</b>\n"
+
+        "⏳ Status: <b>Aguardando pagamento</b>\n\n"
+
+        "📱 Escaneie o QR Code ou utilize "
+        "o PIX Copia e Cola abaixo."
+    )
+
+
+    # ========================================================
+    # ENVIAR QR
+    # ========================================================
+
+    try:
+
+        if qr_base64:
+
+            qr_arquivo = (
+                decodificar_qr_base64(
+                    qr_base64
+                )
+            )
+
+
+            await update.message.reply_photo(
+                photo=InputFile(
+                    qr_arquivo,
+                    filename="pix.png",
+                ),
+
+                caption=legenda,
+
+                parse_mode=ParseMode.HTML,
+            )
+
+
+        elif qr_copy_paste:
+
+            qr_arquivo = (
+                gerar_qrcode_local(
+                    qr_copy_paste
+                )
+            )
+
+
+            await update.message.reply_photo(
+                photo=InputFile(
+                    qr_arquivo,
+                    filename="pix.png",
+                ),
+
+                caption=legenda,
+
+                parse_mode=ParseMode.HTML,
+            )
+
+
+        elif qr_url:
+
+            await update.message.reply_photo(
+                photo=qr_url,
+
+                caption=legenda,
+
+                parse_mode=ParseMode.HTML,
+            )
+
+
+    except Exception:
+
+        logger.exception(
+            "Erro enviando QR Code."
+        )
+
+
+    # ========================================================
+    # PIX COPIA E COLA
+    # ========================================================
+
+    if qr_copy_paste:
+
+        codigo_seguro = html.escape(
+            qr_copy_paste
+        )
+
+
+        # O botão copy_text aceita no máximo
+        # 256 caracteres.
+        teclado_copiar = None
+
+
+        if len(qr_copy_paste) <= 256:
+
+            teclado_copiar = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "📋 Copiar PIX",
+
+                            copy_text=CopyTextButton(
+                                text=qr_copy_paste
+                            ),
+                        )
+                    ]
+                ]
+            )
+
+
+        await update.message.reply_text(
+            text=(
+                "📋 <b>PIX Copia e Cola</b>\n\n"
+
+                f"<code>{codigo_seguro}</code>\n\n"
+
+                "Após o pagamento, aguarde a "
+                "confirmação automática."
+            ),
+
+            parse_mode=ParseMode.HTML,
+
+            reply_markup=teclado_copiar,
+        )
 
 
 # ============================================================
@@ -525,96 +1050,13 @@ async def error_handler(
 ):
 
     logger.error(
-        "Erro durante execução:",
+        "Erro Telegram:",
         exc_info=context.error,
     )
 
 
 # ============================================================
-# MAIN
+# INICIALIZA BANCO AO IMPORTAR
 # ============================================================
 
-def main():
-
-    # ========================================================
-    # VALIDAR TOKEN
-    # ========================================================
-
-    if not TELEGRAM_BOT_TOKEN:
-
-        raise RuntimeError(
-            "\n"
-            "ERRO: TELEGRAM_BOT_TOKEN não encontrado.\n\n"
-            "Verifique seu arquivo .env.\n\n"
-            "Exemplo:\n"
-            "TELEGRAM_BOT_TOKEN=seu_token\n"
-        )
-
-
-    # ========================================================
-    # CRIAR BOT
-    # ========================================================
-
-    app = (
-        ApplicationBuilder()
-        .token(TELEGRAM_BOT_TOKEN)
-        .build()
-    )
-
-
-    # ========================================================
-    # HANDLERS
-    # ========================================================
-
-    app.add_handler(
-        CommandHandler(
-            "start",
-            start
-        )
-    )
-
-    app.add_handler(
-        CommandHandler(
-            "pix",
-            pix
-        )
-    )
-
-    app.add_handler(
-        CallbackQueryHandler(
-            handle_callback
-        )
-    )
-
-    app.add_error_handler(
-        error_handler
-    )
-
-
-    # ========================================================
-    # START
-    # ========================================================
-
-    print(
-        "\n"
-        "========================================\n"
-        "🎩 CHAPELEIRO7STORE\n"
-        "✅ Bot iniciado\n"
-        "✅ Menu Inline carregado\n"
-        "✅ Sistema de navegação carregado\n"
-        "✅ Aguardando mensagens...\n"
-        "========================================\n"
-    )
-
-
-    app.run_polling(
-        drop_pending_updates=True
-    )
-
-
-# ============================================================
-# EXECUÇÃO
-# ============================================================
-
-if __name__ == "__main__":
-    main()
+init_db()
