@@ -273,69 +273,51 @@ async def health():
 # TELEGRAM WEBHOOK
 # ============================================================
 
-@app.post("/telegram/webhook")
-async def telegram_webhook(
-    request: Request
-):
+@app.post("/webhooks/gateway7")
+async def gateway7_webhook(request: Request):
 
-    secret_recebido = (
-        request.headers.get(
-            "X-Telegram-Bot-Api-Secret-Token"
-        )
+    raw_body = await request.body()
+
+    signature = request.headers.get(
+        "X-Gateway7-Signature"
     )
-
-
-    if not secret_recebido:
-
-        raise HTTPException(
-            status_code=401,
-
-            detail="Telegram secret ausente",
-        )
-
-
-    if not hmac.compare_digest(
-        secret_recebido,
-        TELEGRAM_WEBHOOK_SECRET,
-    ):
-
-        raise HTTPException(
-            status_code=401,
-
-            detail="Telegram secret inválido",
-        )
-
 
     try:
-
-        data = await request.json()
-
-    except Exception:
-
-        raise HTTPException(
-            status_code=400,
-
-            detail="JSON inválido",
+        payload = json.loads(
+            raw_body.decode("utf-8")
         )
 
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="JSON inválido"
+        )
 
-    update = Update.de_json(
-        data=data,
-
-        bot=telegram_app.bot,
+    logger.info(
+        "========================================"
     )
 
-
-    await telegram_app.update_queue.put(
-        update
+    logger.info(
+        "GATEWAY7 WEBHOOK RECEBIDO"
     )
 
+    logger.info(
+        "Signature recebida: %s",
+        bool(signature)
+    )
+
+    logger.info(
+        "Payload: %s",
+        payload
+    )
+
+    logger.info(
+        "========================================"
+    )
 
     return {
-        "ok": True
+        "received": True
     }
-
-
 # ============================================================
 # VALIDAR DOMINIPAY
 # ============================================================
