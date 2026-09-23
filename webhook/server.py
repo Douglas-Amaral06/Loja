@@ -7,10 +7,7 @@ import hashlib
 import logging
 
 from decimal import Decimal
-
-from contextlib import (
-    asynccontextmanager,
-)
+from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 
@@ -21,11 +18,7 @@ from fastapi import (
 )
 
 from telegram import Update
-
-from telegram.constants import (
-    ParseMode,
-)
-
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -53,21 +46,17 @@ from database.db import (
 
 load_dotenv()
 
-
 TELEGRAM_BOT_TOKEN = os.getenv(
     "TELEGRAM_BOT_TOKEN"
 )
-
 
 TELEGRAM_WEBHOOK_URL = os.getenv(
     "TELEGRAM_WEBHOOK_URL"
 )
 
-
 TELEGRAM_WEBHOOK_SECRET = os.getenv(
     "TELEGRAM_WEBHOOK_SECRET"
 )
-
 
 C7_API_SECRET = os.getenv(
     "C7_API_SECRET"
@@ -85,17 +74,16 @@ logging.basicConfig(
         "%(levelname)s - "
         "%(message)s"
     ),
-
     level=logging.INFO,
 )
 
-
+# Evita expor URLs completas do Telegram
+# nos logs do httpx.
 logging.getLogger(
     "httpx"
 ).setLevel(
     logging.WARNING
 )
-
 
 logger = logging.getLogger(
     __name__
@@ -109,32 +97,28 @@ logger = logging.getLogger(
 if not TELEGRAM_BOT_TOKEN:
 
     raise RuntimeError(
-        "TELEGRAM_BOT_TOKEN "
-        "não configurado."
+        "TELEGRAM_BOT_TOKEN não configurado."
     )
 
 
 if not TELEGRAM_WEBHOOK_URL:
 
     raise RuntimeError(
-        "TELEGRAM_WEBHOOK_URL "
-        "não configurado."
+        "TELEGRAM_WEBHOOK_URL não configurado."
     )
 
 
 if not TELEGRAM_WEBHOOK_SECRET:
 
     raise RuntimeError(
-        "TELEGRAM_WEBHOOK_SECRET "
-        "não configurado."
+        "TELEGRAM_WEBHOOK_SECRET não configurado."
     )
 
 
 if not C7_API_SECRET:
 
     raise RuntimeError(
-        "C7_API_SECRET "
-        "não configurado."
+        "C7_API_SECRET não configurado."
     )
 
 
@@ -182,7 +166,7 @@ telegram_app.add_error_handler(
 
 
 # ============================================================
-# START / STOP
+# STARTUP / SHUTDOWN
 # ============================================================
 
 @asynccontextmanager
@@ -192,23 +176,15 @@ async def lifespan(
 
     init_db()
 
-
     logger.info(
         "Inicializando Telegram..."
     )
 
+    await telegram_app.initialize()
 
-    await (
-        telegram_app
-        .initialize()
-    )
-
-
-    resultado = (
-        await telegram_app.bot
-        .set_webhook(
-            url=
-                TELEGRAM_WEBHOOK_URL,
+    webhook_ok = (
+        await telegram_app.bot.set_webhook(
+            url=TELEGRAM_WEBHOOK_URL,
 
             allowed_updates=
                 Update.ALL_TYPES,
@@ -218,28 +194,26 @@ async def lifespan(
         )
     )
 
-
     logger.info(
-        "Telegram webhook: %s",
-        resultado,
+        "Telegram webhook configurado: %s",
+        webhook_ok,
     )
 
-
     await telegram_app.start()
-
 
     logger.info(
         "🤖 Telegram online."
     )
 
-
     logger.info(
         "💰 C7 webhook online."
     )
 
-
     yield
 
+    logger.info(
+        "Encerrando Telegram..."
+    )
 
     await telegram_app.stop()
 
@@ -251,14 +225,9 @@ async def lifespan(
 # ============================================================
 
 app = FastAPI(
-    title=
-        "CHAPELEIRO7STORE API",
-
-    version=
-        "2.0.0",
-
-    lifespan=
-        lifespan,
+    title="CHAPELEIRO7STORE API",
+    version="2.0.0",
+    lifespan=lifespan,
 )
 
 
@@ -270,26 +239,18 @@ app = FastAPI(
 async def home():
 
     return {
-        "status":
-            "online",
-
-        "service":
-            "CHAPELEIRO7STORE",
-
-        "telegram":
-            "/telegram/webhook",
-
-        "c7":
-            "/webhooks/c7",
+        "status": "online",
+        "service": "CHAPELEIRO7STORE",
+        "telegram": "/telegram/webhook",
+        "c7": "/webhooks/c7",
     }
 
 
-# Render costuma testar HEAD /
-
+# Render pode fazer HEAD /
 @app.head("/")
 async def home_head():
 
-    return {}
+    return
 
 
 # ============================================================
@@ -300,14 +261,9 @@ async def home_head():
 async def health():
 
     return {
-        "status":
-            "ok",
-
-        "telegram":
-            "online",
-
-        "c7":
-            "online",
+        "status": "ok",
+        "telegram": "online",
+        "c7": "online",
     }
 
 
@@ -315,16 +271,17 @@ async def health():
 # TELEGRAM WEBHOOK
 # ============================================================
 
-@app.post("/webhooks/gateway7")
-async def gateway7_webhook(request: Request):
+@app.post("/telegram/webhook")
+async def telegram_webhook(
+    request: Request
+):
 
-    raw_body = await request.body()
-
-    signature = request.headers.get(
-        "X-Gateway7-Signature"
+    secret_recebido = (
+        request.headers.get(
+            "X-Telegram-Bot-Api-Secret-Token"
+        )
     )
 
-<<<<<<< HEAD
 
     if not secret_recebido:
 
@@ -351,31 +308,24 @@ async def gateway7_webhook(request: Request):
 
     try:
 
-        data = (
-            await request.json()
-        )
+        data = await request.json()
 
-    except Exception:
+    except Exception as exc:
+
+        logger.warning(
+            "JSON inválido recebido "
+            "do Telegram: %s",
+            exc,
+        )
 
         raise HTTPException(
             status_code=400,
 
             detail=
                 "JSON inválido",
-=======
-    try:
-        payload = json.loads(
-            raw_body.decode("utf-8")
->>>>>>> 989c9e3648f8b5d875a29d43b13cc605f45aa7c7
-        )
+        ) from exc
 
-    except Exception:
-        raise HTTPException(
-            status_code=400,
-            detail="JSON inválido"
-        )
 
-<<<<<<< HEAD
     update = Update.de_json(
         data=data,
 
@@ -388,58 +338,32 @@ async def gateway7_webhook(request: Request):
         telegram_app
         .update_queue
         .put(update)
-=======
-    logger.info(
-        "========================================"
     )
 
-    logger.info(
-        "GATEWAY7 WEBHOOK RECEBIDO"
->>>>>>> 989c9e3648f8b5d875a29d43b13cc605f45aa7c7
-    )
-
-    logger.info(
-        "Signature recebida: %s",
-        bool(signature)
-    )
-
-    logger.info(
-        "Payload: %s",
-        payload
-    )
-
-    logger.info(
-        "========================================"
-    )
 
     return {
-<<<<<<< HEAD
-        "ok":
-            True
-=======
-        "received": True
->>>>>>> 989c9e3648f8b5d875a29d43b13cc605f45aa7c7
+        "ok": True
     }
+
+
 # ============================================================
 # ASSINATURA WEBHOOK C7
 # ============================================================
 
-def _assinatura_c7_esperada(
+def _gerar_assinatura_c7(
     timestamp: str,
-
-    body_text: str
+    body_text: str,
 ) -> str:
 
     # Documentação:
     #
     # HMAC-SHA256(
     #   api_secret,
-    #   timestamp + "." + body
+    #   timestamp + "." + JSON.stringify(body)
     # )
 
     signed_payload = (
-        f"{timestamp}."
-        f"{body_text}"
+        f"{timestamp}.{body_text}"
     )
 
 
@@ -457,11 +381,8 @@ def _assinatura_c7_esperada(
 
 
 def validar_assinatura_c7(
-
     raw_body: bytes,
-
     timestamp: str,
-
     signature: str,
 ) -> bool:
 
@@ -483,85 +404,49 @@ def validar_assinatura_c7(
         return False
 
 
-    # Janela de 5 minutos.
-    #
-    # A API também utiliza essa regra
-    # nas assinaturas de escrita.
-
     agora = int(
         time.time()
     )
 
 
+    # Janela máxima de 5 minutos.
     if abs(
-        agora
-        - timestamp_int
+        agora - timestamp_int
     ) > 300:
 
         logger.warning(
-            "Webhook C7 com "
-            "timestamp expirado."
+            "Webhook C7 rejeitado: "
+            "timestamp fora da janela."
         )
 
         return False
 
 
     # ========================================================
-    # BODY CRU
-    # ========================================================
-
-    raw_text = (
-        raw_body.decode(
-            "utf-8"
-        )
-    )
-
-
-    expected_raw = (
-        _assinatura_c7_esperada(
-            timestamp,
-            raw_text,
-        )
-    )
-
-
-    if hmac.compare_digest(
-        expected_raw,
-        signature,
-    ):
-
-        return True
-
-
-    # ========================================================
-    # FALLBACK JSON.stringify
-    #
-    # A documentação mostra:
-    #
     # JSON.stringify(req.body)
-    #
-    # Então também tentamos a
-    # representação JSON compacta.
     # ========================================================
 
     try:
 
-        parsed = json.loads(
-            raw_text
+        body_text = raw_body.decode(
+            "utf-8"
         )
 
 
-        compact_text = (
-            json.dumps(
-                parsed,
+        payload = json.loads(
+            body_text
+        )
 
-                separators=(
-                    ",",
-                    ":"
-                ),
 
-                ensure_ascii=False,
-            )
+        compact_body = json.dumps(
+            payload,
+
+            separators=(
+                ",",
+                ":"
+            ),
+
+            ensure_ascii=False,
         )
 
 
@@ -570,16 +455,48 @@ def validar_assinatura_c7(
         return False
 
 
-    expected_compact = (
-        _assinatura_c7_esperada(
-            timestamp,
-            compact_text,
+    # ========================================================
+    # PRIMEIRA TENTATIVA:
+    # JSON compacto equivalente a JSON.stringify
+    # ========================================================
+
+    expected_signature = (
+        _gerar_assinatura_c7(
+            timestamp=
+                timestamp,
+
+            body_text=
+                compact_body,
+        )
+    )
+
+
+    if hmac.compare_digest(
+        expected_signature,
+        signature,
+    ):
+
+        return True
+
+
+    # ========================================================
+    # FALLBACK:
+    # body cru
+    # ========================================================
+
+    expected_raw_signature = (
+        _gerar_assinatura_c7(
+            timestamp=
+                timestamp,
+
+            body_text=
+                body_text,
         )
     )
 
 
     return hmac.compare_digest(
-        expected_compact,
+        expected_raw_signature,
         signature,
     )
 
@@ -648,11 +565,10 @@ async def c7_webhook(
 
 
     # ========================================================
-    # VALIDAR HMAC
+    # VALIDAR ASSINATURA
     # ========================================================
 
     if not validar_assinatura_c7(
-
         raw_body=
             raw_body,
 
@@ -664,10 +580,9 @@ async def c7_webhook(
     ):
 
         logger.warning(
-            "Webhook C7 com "
+            "Webhook C7 rejeitado: "
             "assinatura inválida."
         )
-
 
         raise HTTPException(
             status_code=401,
@@ -690,14 +605,20 @@ async def c7_webhook(
         )
 
 
-    except Exception:
+    except Exception as exc:
+
+        logger.warning(
+            "Webhook C7 com "
+            "JSON inválido: %s",
+            exc,
+        )
 
         raise HTTPException(
             status_code=400,
 
             detail=
                 "JSON inválido",
-        )
+        ) from exc
 
 
     # ========================================================
@@ -723,6 +644,35 @@ async def c7_webhook(
         data = {}
 
 
+    payment_id = (
+        data.get(
+            "identifier"
+        )
+    )
+
+
+    external_id = (
+        data.get(
+            "correlationID"
+        )
+    )
+
+
+    status = str(
+        data.get(
+            "status",
+            ""
+        )
+    ).lower()
+
+
+    amount = (
+        data.get(
+            "amount"
+        )
+    )
+
+
     logger.info(
         "C7 webhook | "
         "event=%s | "
@@ -733,21 +683,13 @@ async def c7_webhook(
 
         evento,
 
-        data.get(
-            "identifier"
-        ),
+        payment_id,
 
-        data.get(
-            "correlationID"
-        ),
+        external_id,
 
-        data.get(
-            "status"
-        ),
+        status,
 
-        data.get(
-            "amount"
-        ),
+        amount,
     )
 
 
@@ -761,39 +703,9 @@ async def c7_webhook(
     ):
 
         return {
-            "received":
-                True,
-
-            "ignored":
-                True,
+            "received": True,
+            "ignored": True,
         }
-
-
-    # ========================================================
-    # DADOS
-    # ========================================================
-
-    payment_id = data.get(
-        "identifier"
-    )
-
-
-    external_id = data.get(
-        "correlationID"
-    )
-
-
-    status = str(
-        data.get(
-            "status",
-            ""
-        )
-    ).lower()
-
-
-    amount = data.get(
-        "amount"
-    )
 
 
     # ========================================================
@@ -808,13 +720,9 @@ async def c7_webhook(
             status,
         )
 
-
         return {
-            "received":
-                True,
-
-            "ignored":
-                True,
+            "received": True,
+            "ignored": True,
         }
 
 
@@ -826,9 +734,10 @@ async def c7_webhook(
         raise HTTPException(
             status_code=400,
 
-            detail=
-                "Webhook sem identificador "
-                "do pagamento",
+            detail=(
+                "Webhook sem identifier "
+                "e sem correlationID"
+            ),
         )
 
 
@@ -852,18 +761,24 @@ async def c7_webhook(
             )
 
 
-        except Exception:
+        except Exception as exc:
+
+            logger.warning(
+                "Valor inválido no "
+                "webhook C7: %s",
+                amount,
+            )
 
             raise HTTPException(
                 status_code=400,
 
                 detail=
                     "Valor inválido no webhook",
-            )
+            ) from exc
 
 
     # ========================================================
-    # PROCESSAR PAGAMENTO
+    # PROCESSAR NO SQLITE
     # ========================================================
 
     resultado = (
@@ -871,15 +786,20 @@ async def c7_webhook(
 
             processar_pagamento_webhook,
 
-            payment_id,
+            payment_id=
+                payment_id,
 
-            status,
+            status=
+                status,
 
-            webhook_amount_cents,
+            webhook_amount_cents=
+                webhook_amount_cents,
 
-            external_id,
+            external_id=
+                external_id,
 
-            None,
+            event_id=
+                None,
         )
     )
 
@@ -910,18 +830,13 @@ async def c7_webhook(
         == "payment_not_found"
     ):
 
-        # Não retornamos 2xx.
-        #
-        # Isso permite que o provedor
-        # faça as próximas tentativas
-        # de webhook.
-
         raise HTTPException(
             status_code=409,
 
-            detail=
+            detail=(
                 "Pagamento ainda não "
-                "encontrado localmente",
+                "encontrado localmente"
+            ),
         )
 
 
@@ -947,7 +862,6 @@ async def c7_webhook(
                 "received"
             ),
         )
-
 
         raise HTTPException(
             status_code=409,
@@ -984,15 +898,12 @@ async def c7_webhook(
         )
 
 
-        # ====================================================
-        # AVISAR USUÁRIO
-        # ====================================================
-
         try:
 
             await (
                 telegram_app.bot
                 .send_message(
+
                     chat_id=
                         telegram_id,
 
@@ -1017,10 +928,16 @@ async def c7_webhook(
 
         except Exception:
 
+            # O saldo já foi creditado.
+            #
+            # Se só a mensagem falhar,
+            # NÃO queremos provocar retry
+            # e risco de processamento duplo.
+
             logger.exception(
                 "Pagamento foi creditado, "
-                "mas não foi possível "
-                "avisar o usuário."
+                "mas não foi possível avisar "
+                "o usuário no Telegram."
             )
 
 
@@ -1029,9 +946,6 @@ async def c7_webhook(
     # ========================================================
 
     return {
-        "received":
-            True,
-
-        "action":
-            action,
+        "received": True,
+        "action": action,
     }
