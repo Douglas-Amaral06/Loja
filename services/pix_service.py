@@ -1,214 +1,255 @@
 import os
+import json
+import hmac
+import time
+import uuid
+import hashlib
 import logging
-
 from decimal import Decimal
 
 import httpx
-
 from dotenv import load_dotenv
 
 
-# ============================================================
-# ENV
-# ============================================================
-
 load_dotenv()
 
-
-DOMINIPAY_API_TOKEN = os.getenv(
-    "DOMINIPAY_API_TOKEN"
+C7_API_KEY = os.getenv("C7_API_KEY")
+C7_API_SECRET = os.getenv("C7_API_SECRET")
+C7_API_URL = os.getenv(
+    "C7_API_URL",
+    "https://api.carteirado7.com/v2"
 )
-
-DOMINIPAY_API_URL = os.getenv(
-    "DOMINIPAY_API_URL"
-)
-
-DOMINIPAY_WEBHOOK_URL = os.getenv(
-    "DOMINIPAY_WEBHOOK_URL"
-)
-
-# Só será usado caso esteja configurado.
-DOMINIPAY_EMAIL = os.getenv(
-    "DOMINIPAY_EMAIL"
-)
-
-
-# ============================================================
-# LOG
-# ============================================================
+C7_WEBHOOK_URL = os.getenv("C7_WEBHOOK_URL")
 
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
-# ============================================================
-# EXCEPTION
-# ============================================================
-
-class DominipayError(Exception):
+class C7Error(Exception):
     pass
 
 
-# ============================================================
-# URL FINAL
-# ============================================================
+def _validar_configuracao():
+    faltando = []
 
-def obter_url_pagamentos():
+    if not C7_API_KEY:
+        faltando.append("C7_API_KEY")
 
-    if not DOMINIPAY_API_URL:
+    if not C7_API_SECRET:
+        faltando.append("C7_API_SECRET")
 
-        raise DominipayError(
-            "DOMINIPAY_API_URL não configurada."
+    if not C7_API_URL:
+        faltando.append("C7_API_URL")
+
+    if not C7_WEBHOOK_URL:
+        faltando.append("C7_WEBHOOK_URL")
+
+    if faltando:
+        raise C7Error(
+            "Variáveis não configuradas: "
+            + ", ".join(faltando)
         )
 
 
-    url = DOMINIPAY_API_URL.rstrip("/")
+def _url_criar_pagamento() -> str:
+    base = C7_API_URL.rstrip("/")
+
+    if base.endswith("/payment/create"):
+        return base
+
+    return f"{base}/payment/create"
 
 
-    # Caso você já tenha colocado a URL completa.
-    if url.endswith(
-        "/api-public/payments"
-    ):
+def _url_status_pagamento(
+    payment_id: str
+) -> str:
 
-        return url
+    base = C7_API_URL.rstrip("/")
 
-
-    # Caso tenha colocado somente a Base URL.
     return (
-        url
-        + "/api-public/payments"
+        f"{base}/payment/"
+        f"{payment_id}/status"
     )
 
 
-# ============================================================
-# PEGAR OBJETO DE PAGAMENTO
-# ============================================================
+def _serializar_body(
+    payload: dict
+) -> str:
 
-def extrair_pagamento(
-    response_json: dict
-):
+    # IMPORTANTE:
+    # vamos assinar exatamente o mesmo
+    # JSON que será enviado para a API.
 
-    # Algumas APIs retornam diretamente:
-    #
-    # {
-    #   "id": "...",
-    #   ...
-    # }
-    #
-    # Outras:
-    #
-    # {
-    #   "data": {
-    #       "id": "..."
-    #   }
-    # }
-
-    if isinstance(
-        response_json.get("data"),
-        dict
-    ):
-
-        return response_json["data"]
+    return json.dumps(
+        payload,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
 
 
-    if isinstance(
-        response_json.get("payment"),
-        dict
-    ):
+def _criar_headers_escrita(
+    body: str
+) -> dict:
 
-        return response_json["payment"]
+    timestamp = str(
+        int(time.time())
+    )
 
+    nonce = str(
+        uuid.uuid4()
+    )
 
-    return response_json
+    signed_payload = (
+        f"{timestamp}."
+        f"{nonce}."
+        f"{body}"
+    )
 
+    signature = hmac.new(
+        C7_API_SECRET.encode("utf-8"),
+        signed_payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
 
-# ============================================================
-# CRIAR PAGAMENTO
-# ============================================================
-
-async def criar_pagamento_pix(
-    valor: Decimal,
-    telegram_id: int,
-):
-
-    if not DOMINIPAY_API_TOKEN:
-
-        raise DominipayError(
-            "DOMINIPAY_API_TOKEN não configurado."
-        )
-
-
-    if not DOMINIPAY_WEBHOOK_URL:
-
-        raise DominipayError(
-            "DOMINIPAY_WEBHOOK_URL não configurada."
-        )
-
-
-    url = obter_url_pagamentos()
-
-
-    # ========================================================
-    # PAYLOAD
-    # ========================================================
-
-    payload = {
-        "amount": float(valor),
-
-        "observation": (
-            f"telegram_id={telegram_id}"
-        ),
-
-        "webhookUrl":
-            DOMINIPAY_WEBHOOK_URL,
-    }
-
-
-    # ========================================================
-    # EMAIL
-    #
-    # Só manda se estiver configurado.
-    #
-    # Se a API não exigir, perfeito.
-    #
-    # Se retornar erro dizendo que email é obrigatório,
-    # depois colocamos DOMINIPAY_EMAIL.
-    # ========================================================
-
-    if DOMINIPAY_EMAIL:
-
-        payload["email"] = (
-            DOMINIPAY_EMAIL
-        )
-
-
-    # ========================================================
-    # HEADERS
-    # ========================================================
-
-    headers = {
-        "Authorization": (
-            f"Bearer {DOMINIPAY_API_TOKEN}"
-        ),
+    return {
+        "Authorization":
+            f"Bearer {C7_API_KEY}",
 
         "Content-Type":
             "application/json",
 
         "Accept":
             "application/json",
+
+        "X-C7-Timestamp":
+            timestamp,
+
+        "X-C7-Nonce":
+            nonce,
+
+        "X-C7-Signature":
+            signature,
     }
 
 
-    logger.info(
-        "Criando PIX DominiPay | "
-        "telegram=%s | valor=%s",
-        telegram_id,
-        valor,
+def _extrair_erro(
+    response: httpx.Response
+) -> str:
+
+    try:
+        data = response.json()
+
+    except Exception:
+        return response.text[:1000]
+
+
+    if isinstance(data, dict):
+
+        error = data.get("error")
+
+        if isinstance(error, dict):
+
+            code = error.get("code")
+            message = error.get("message")
+            request_id = error.get(
+                "request_id"
+            )
+
+            partes = [
+                item
+                for item in (
+                    code,
+                    message,
+                    request_id,
+                )
+                if item
+            ]
+
+            if partes:
+
+                return " | ".join(
+                    str(item)
+                    for item in partes
+                )
+
+
+        message = data.get("message")
+
+        if message:
+            return str(message)
+
+
+    return str(data)[:1000]
+
+
+async def criar_pagamento_pix(
+    valor: Decimal,
+    telegram_id: int,
+) -> dict:
+
+    _validar_configuracao()
+
+
+    # Identificador nosso.
+    #
+    # Depois o webhook devolve isso
+    # em correlationID.
+
+    external_id = (
+        f"tg_{telegram_id}_"
+        f"{uuid.uuid4().hex}"
     )
 
 
-    # ========================================================
-    # REQUEST
-    # ========================================================
+    # A documentação desta API trabalha
+    # o amount em reais.
+    #
+    # /pix 10
+    # ->
+    # "amount": 10.00
+
+    payload = {
+        "amount": float(valor),
+
+        "callbackUrl":
+            C7_WEBHOOK_URL,
+
+        "externalId":
+            external_id,
+    }
+
+
+    # Não enviamos acquirer_code.
+    #
+    # A própria API selecionará
+    # automaticamente a adquirente.
+
+
+    body = _serializar_body(
+        payload
+    )
+
+
+    headers = (
+        _criar_headers_escrita(
+            body
+        )
+    )
+
+
+    url = _url_criar_pagamento()
+
+
+    logger.info(
+        "Criando PIX C7 | "
+        "telegram=%s | "
+        "valor=%s | "
+        "external_id=%s",
+        telegram_id,
+        valor,
+        external_id,
+    )
+
 
     try:
 
@@ -219,144 +260,251 @@ async def criar_pagamento_pix(
             response = await client.post(
                 url,
                 headers=headers,
-                json=payload,
+
+                # IMPORTANTE:
+                # enviamos exatamente o
+                # body que assinamos.
+
+                content=body.encode(
+                    "utf-8"
+                ),
             )
 
 
     except httpx.TimeoutException as exc:
 
-        raise DominipayError(
-            "Timeout ao conectar com a DominiPay."
+        raise C7Error(
+            "Timeout ao conectar "
+            "com a API C7."
         ) from exc
 
 
     except httpx.RequestError as exc:
 
-        raise DominipayError(
-            "Erro de conexão com a DominiPay."
+        raise C7Error(
+            "Erro de conexão "
+            "com a API C7."
         ) from exc
 
 
-    # ========================================================
-    # ERRO DA API
-    # ========================================================
+    if (
+        response.status_code != 201
+        and not response.is_success
+    ):
 
-    if not response.is_success:
-
-        try:
-
-            detalhe = response.json()
-
-        except Exception:
-
-            detalhe = response.text[:1000]
-
+        detalhe = _extrair_erro(
+            response
+        )
 
         logger.error(
-            "DominiPay HTTP %s | %s",
+            "C7 HTTP %s | %s",
             response.status_code,
             detalhe,
         )
 
-
-        raise DominipayError(
-            f"DominiPay retornou HTTP "
-            f"{response.status_code}."
+        raise C7Error(
+            f"C7 retornou HTTP "
+            f"{response.status_code}: "
+            f"{detalhe}"
         )
 
-
-    # ========================================================
-    # JSON
-    # ========================================================
 
     try:
 
-        response_json = (
-            response.json()
-        )
+        data = response.json()
 
-    except Exception as exc:
+    except ValueError as exc:
 
-        raise DominipayError(
-            "Resposta inválida da DominiPay."
+        raise C7Error(
+            "A API C7 retornou "
+            "uma resposta JSON inválida."
         ) from exc
 
 
-    pagamento = extrair_pagamento(
-        response_json
+    if (
+        not isinstance(data, dict)
+        or data.get("ok") is not True
+    ):
+
+        logger.error(
+            "Resposta inesperada "
+            "da C7: %s",
+            data,
+        )
+
+        raise C7Error(
+            "A API C7 não confirmou "
+            "a criação do pagamento."
+        )
+
+
+    payment = data.get(
+        "payment"
     )
 
 
-    # ========================================================
-    # CAMPOS DA DOCUMENTAÇÃO
-    # ========================================================
+    if not isinstance(
+        payment,
+        dict
+    ):
 
-    payment_id = pagamento.get(
+        raise C7Error(
+            "A API C7 não retornou "
+            "o objeto payment."
+        )
+
+
+    payment_id = payment.get(
         "id"
     )
 
-    status = pagamento.get(
+    payment_external_id = (
+        payment.get("externalId")
+        or external_id
+    )
+
+    status = payment.get(
         "status",
         "pending"
     )
 
-    qr_copy_paste = pagamento.get(
-        "qrCopyPaste"
+    pix_copia_e_cola = (
+        payment.get(
+            "pixCopiaECola"
+        )
     )
 
-    qr_code_base64 = pagamento.get(
-        "qrCodeBase64"
+    qr_code_base64 = (
+        payment.get(
+            "qrCodeBase64"
+        )
     )
 
-    qr_code_url = pagamento.get(
-        "qrCodeUrl"
+    expires_at = payment.get(
+        "expiresAt"
     )
 
 
     if not payment_id:
 
-        logger.error(
-            "DominiPay não retornou ID. "
-            "Campos: %s",
-            list(pagamento.keys())
-        )
-
-        raise DominipayError(
-            "Pagamento criado sem ID."
+        raise C7Error(
+            "A API C7 não retornou "
+            "o ID do pagamento."
         )
 
 
-    if not (
-        qr_copy_paste
-        or qr_code_base64
-        or qr_code_url
+    if (
+        not pix_copia_e_cola
+        and not qr_code_base64
     ):
 
-        logger.error(
-            "DominiPay não retornou QR. "
-            "Campos: %s",
-            list(pagamento.keys())
-        )
-
-        raise DominipayError(
-            "DominiPay não retornou os dados do PIX."
+        raise C7Error(
+            "A API C7 não retornou "
+            "QR Code nem PIX Copia e Cola."
         )
 
 
     return {
-        "id": str(payment_id),
+        "id":
+            str(payment_id),
 
-        "status": str(status),
+        "externalId":
+            str(payment_external_id),
 
-        "qrCopyPaste":
-            qr_copy_paste,
+        "amount":
+            payment.get("amount"),
+
+        "status":
+            str(status).lower(),
+
+        "pixCopiaECola":
+            pix_copia_e_cola,
 
         "qrCodeBase64":
             qr_code_base64,
 
-        "qrCodeUrl":
-            qr_code_url,
+        "expiresAt":
+            expires_at,
 
         "raw":
-            response_json,
+            data,
     }
+
+
+async def consultar_status_pagamento(
+    payment_id: str
+) -> dict:
+
+    _validar_configuracao()
+
+
+    url = (
+        _url_status_pagamento(
+            payment_id
+        )
+    )
+
+
+    # Consulta de status exige
+    # somente a API Key.
+
+    headers = {
+        "Authorization":
+            f"Bearer {C7_API_KEY}",
+
+        "Accept":
+            "application/json",
+    }
+
+
+    try:
+
+        async with httpx.AsyncClient(
+            timeout=30.0
+        ) as client:
+
+            response = await client.get(
+                url,
+                headers=headers,
+            )
+
+
+    except httpx.TimeoutException as exc:
+
+        raise C7Error(
+            "Timeout ao consultar "
+            "pagamento na API C7."
+        ) from exc
+
+
+    except httpx.RequestError as exc:
+
+        raise C7Error(
+            "Erro de conexão ao "
+            "consultar a API C7."
+        ) from exc
+
+
+    if not response.is_success:
+
+        detalhe = _extrair_erro(
+            response
+        )
+
+        raise C7Error(
+            f"C7 retornou HTTP "
+            f"{response.status_code}: "
+            f"{detalhe}"
+        )
+
+
+    try:
+
+        return response.json()
+
+    except ValueError as exc:
+
+        raise C7Error(
+            "Resposta inválida ao "
+            "consultar pagamento."
+        ) from exc

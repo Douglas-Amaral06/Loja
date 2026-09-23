@@ -2,21 +2,20 @@ import os
 import sqlite3
 
 from pathlib import Path
-from decimal import Decimal, ROUND_HALF_UP
+
+from decimal import (
+    Decimal,
+    ROUND_HALF_UP,
+)
 
 
 # ============================================================
-# CAMINHO DO BANCO
-#
-# Local:
-# database/store.db
-#
-# Futuramente no Render com Persistent Disk:
-# SQLITE_PATH=/var/data/store.db
+# DATABASE
 # ============================================================
 
 DEFAULT_DB_PATH = (
-    Path(__file__).resolve().parent / "store.db"
+    Path(__file__).resolve().parent
+    / "store.db"
 )
 
 DB_PATH = Path(
@@ -25,6 +24,35 @@ DB_PATH = Path(
         str(DEFAULT_DB_PATH)
     )
 )
+
+
+# ============================================================
+# SCHEMA PIX
+# ============================================================
+
+PIX_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS pix_payments (
+
+    gateway_payment_id TEXT PRIMARY KEY,
+
+    external_id TEXT UNIQUE,
+
+    telegram_id INTEGER NOT NULL,
+
+    amount_cents INTEGER NOT NULL,
+
+    status TEXT NOT NULL DEFAULT 'pending',
+
+    credited INTEGER NOT NULL DEFAULT 0,
+
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    paid_at TEXT,
+
+    FOREIGN KEY (telegram_id)
+        REFERENCES users(telegram_id)
+)
+"""
 
 
 # ============================================================
@@ -38,105 +66,220 @@ def conectar():
         exist_ok=True
     )
 
+
     conn = sqlite3.connect(
         DB_PATH,
         timeout=30
     )
 
-    conn.row_factory = sqlite3.Row
+
+    conn.row_factory = (
+        sqlite3.Row
+    )
+
 
     conn.execute(
         "PRAGMA foreign_keys = ON"
     )
 
+
     conn.execute(
         "PRAGMA journal_mode = WAL"
     )
+
 
     return conn
 
 
 # ============================================================
-# INICIALIZAR BANCO
+# MIGRAÇÃO AUTOMÁTICA DO PIX ANTIGO
+# ============================================================
+
+def _migrar_tabela_pix_se_necessario(
+    conn: sqlite3.Connection
+):
+
+    tabela = conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type='table'
+        AND name='pix_payments'
+        """
+    ).fetchone()
+
+
+    if not tabela:
+
+        conn.execute(
+            PIX_TABLE_SQL
+        )
+
+        return
+
+
+    colunas = {
+        row["name"]
+
+        for row in conn.execute(
+            "PRAGMA table_info(pix_payments)"
+        ).fetchall()
+    }
+
+
+    # Já está no schema novo.
+
+    if (
+        "gateway_payment_id"
+        in colunas
+
+        and "external_id"
+        in colunas
+    ):
+
+        return
+
+
+    # Se existir uma tabela antiga,
+    # NÃO apagamos.
+    #
+    # Renomeamos como backup.
+
+    sufixo = 1
+
+    nome_backup = (
+        "pix_payments_legacy"
+    )
+
+
+    while conn.execute(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type='table'
+        AND name=?
+        """,
+
+        (nome_backup,),
+    ).fetchone():
+
+        sufixo += 1
+
+        nome_backup = (
+            f"pix_payments_legacy_"
+            f"{sufixo}"
+        )
+
+
+    conn.execute(
+        f"""
+        ALTER TABLE pix_payments
+        RENAME TO {nome_backup}
+        """
+    )
+
+
+    conn.execute(
+        PIX_TABLE_SQL
+    )
+
+
+# ============================================================
+# INIT
 # ============================================================
 
 def init_db():
 
     conn = conectar()
 
+
     try:
 
         # ====================================================
-        # USUÁRIOS
+        # USERS
         # ====================================================
 
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
+
                 telegram_id INTEGER PRIMARY KEY,
 
                 username TEXT,
+
                 first_name TEXT,
 
-                balance_cents INTEGER NOT NULL DEFAULT 0,
+                balance_cents INTEGER
+                    NOT NULL
+                    DEFAULT 0,
 
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT
+                    NOT NULL
+                    DEFAULT CURRENT_TIMESTAMP,
+
+                updated_at TEXT
+                    NOT NULL
+                    DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
 
 
         # ====================================================
-        # PAGAMENTOS PIX
+        # PIX
         # ====================================================
 
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS pix_payments (
-                dominipay_id TEXT PRIMARY KEY,
-
-                telegram_id INTEGER NOT NULL,
-
-                amount_cents INTEGER NOT NULL,
-
-                status TEXT NOT NULL DEFAULT 'pending',
-
-                credited INTEGER NOT NULL DEFAULT 0,
-
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-                paid_at TEXT,
-
-                FOREIGN KEY (telegram_id)
-                    REFERENCES users(telegram_id)
-            )
-            """
+        _migrar_tabela_pix_se_necessario(
+            conn
         )
 
 
         # ====================================================
-        # EVENTOS DE WEBHOOK
-        #
-        # Serve para impedir que o mesmo webhook seja
-        # processado duas vezes.
+        # EVENTOS
         # ====================================================
 
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS webhook_events (
+
                 event_id TEXT PRIMARY KEY,
 
                 payment_id TEXT,
+
                 event_type TEXT,
 
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT
+                    NOT NULL
+                    DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
 
 
+        # ====================================================
+        # ÍNDICES
+        # ====================================================
+
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+            idx_pix_external_id
+            ON pix_payments(external_id)
+            """
+        )
+
+
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+            idx_pix_telegram_id
+            ON pix_payments(telegram_id)
+            """
+        )
+
+
         conn.commit()
+
 
     finally:
 
@@ -144,7 +287,7 @@ def init_db():
 
 
 # ============================================================
-# CONVERTER REAIS -> CENTAVOS
+# REAL -> CENTAVOS
 # ============================================================
 
 def decimal_para_centavos(
@@ -156,13 +299,15 @@ def decimal_para_centavos(
         rounding=ROUND_HALF_UP
     )
 
+
     return int(
-        valor * Decimal("100")
+        valor
+        * Decimal("100")
     )
 
 
 # ============================================================
-# FORMATAR CENTAVOS -> R$
+# CENTAVOS -> REAL
 # ============================================================
 
 def formatar_centavos(
@@ -174,55 +319,69 @@ def formatar_centavos(
         / Decimal("100")
     )
 
-    texto = f"{reais:.2f}"
 
-    texto = texto.replace(
-        ".",
-        ","
+    return (
+        f"R$ {reais:.2f}"
+        .replace(".", ",")
     )
-
-    return f"R$ {texto}"
 
 
 # ============================================================
-# CRIAR / ATUALIZAR USUÁRIO
+# USUÁRIO
 # ============================================================
 
 def registrar_usuario(
     telegram_id: int,
+
     username: str | None = None,
-    first_name: str | None = None
+
+    first_name: str | None = None,
 ):
 
     conn = conectar()
+
 
     try:
 
         conn.execute(
             """
             INSERT INTO users (
+
                 telegram_id,
+
                 username,
+
                 first_name
             )
+
             VALUES (?, ?, ?)
 
             ON CONFLICT(telegram_id)
+
             DO UPDATE SET
 
-                username = excluded.username,
-                first_name = excluded.first_name,
+                username =
+                    excluded.username,
 
-                updated_at = CURRENT_TIMESTAMP
+                first_name =
+                    excluded.first_name,
+
+                updated_at =
+                    CURRENT_TIMESTAMP
             """,
+
             (
                 telegram_id,
+
                 username,
+
                 first_name,
-            )
+            ),
         )
 
+
         conn.commit()
+
 
     finally:
 
@@ -239,23 +398,30 @@ def obter_saldo(
 
     conn = conectar()
 
+
     try:
 
         row = conn.execute(
             """
             SELECT balance_cents
+
             FROM users
+
             WHERE telegram_id = ?
             """,
-            (telegram_id,)
+
+            (telegram_id,),
         ).fetchone()
+
 
         if not row:
             return 0
 
+
         return int(
             row["balance_cents"]
         )
+
 
     finally:
 
@@ -263,48 +429,125 @@ def obter_saldo(
 
 
 # ============================================================
-# SALVAR PAGAMENTO PIX CRIADO
+# REGISTRAR PIX
 # ============================================================
 
 def registrar_pagamento_pix(
-    dominipay_id: str,
+
+    gateway_payment_id: str,
+
+    external_id: str,
+
     telegram_id: int,
+
     amount_cents: int,
-    status: str
+
+    status: str,
 ):
 
     conn = conectar()
+
 
     try:
 
         conn.execute(
             """
             INSERT INTO pix_payments (
-                dominipay_id,
+
+                gateway_payment_id,
+
+                external_id,
+
                 telegram_id,
+
                 amount_cents,
+
                 status
             )
-            VALUES (?, ?, ?, ?)
 
-            ON CONFLICT(dominipay_id)
+            VALUES (?, ?, ?, ?, ?)
+
+            ON CONFLICT(gateway_payment_id)
+
             DO UPDATE SET
 
-                status = excluded.status
+                external_id =
+                    excluded.external_id,
+
+                status =
+                    excluded.status
             """,
+
             (
-                dominipay_id,
+                gateway_payment_id,
+
+                external_id,
+
                 telegram_id,
+
                 amount_cents,
+
                 status,
-            )
+            ),
         )
 
+
         conn.commit()
+
 
     finally:
 
         conn.close()
+
+
+# ============================================================
+# BUSCAR PAGAMENTO
+# ============================================================
+
+def _buscar_pagamento(
+
+    conn: sqlite3.Connection,
+
+    payment_id: str | None,
+
+    external_id: str | None,
+):
+
+    if payment_id:
+
+        row = conn.execute(
+            """
+            SELECT *
+
+            FROM pix_payments
+
+            WHERE gateway_payment_id = ?
+            """,
+
+            (payment_id,),
+        ).fetchone()
+
+
+        if row:
+            return row
+
+
+    if external_id:
+
+        return conn.execute(
+            """
+            SELECT *
+
+            FROM pix_payments
+
+            WHERE external_id = ?
+            """,
+
+            (external_id,),
+        ).fetchone()
+
+
+    return None
 
 
 # ============================================================
@@ -312,65 +555,82 @@ def registrar_pagamento_pix(
 # ============================================================
 
 def processar_pagamento_webhook(
-    payment_id: str,
+
+    payment_id: str | None,
+
     status: str,
-    event_id: str | None,
-    webhook_amount_cents: int | None = None,
+
+    webhook_amount_cents:
+        int | None = None,
+
+    external_id:
+        str | None = None,
+
+    event_id:
+        str | None = None,
 ):
 
     conn = conectar()
 
+
     try:
 
-        # Trava escrita enquanto processamos o dinheiro.
+        # Trava escrita do SQLite.
+        #
+        # Evita duas confirmações
+        # creditarem o saldo juntas.
+
         conn.execute(
             "BEGIN IMMEDIATE"
         )
 
 
         # ====================================================
-        # EVENTO JÁ PROCESSADO?
+        # EVENTO DUPLICADO
         # ====================================================
 
         if event_id:
 
-            evento_existente = conn.execute(
-                """
-                SELECT event_id
-                FROM webhook_events
-                WHERE event_id = ?
-                """,
-                (event_id,)
-            ).fetchone()
+            evento_existente = (
+                conn.execute(
+                    """
+                    SELECT event_id
+
+                    FROM webhook_events
+
+                    WHERE event_id = ?
+                    """,
+
+                    (event_id,),
+                ).fetchone()
+            )
+
 
             if evento_existente:
 
                 conn.rollback()
 
                 return {
-                    "action": "duplicate_event"
+                    "action":
+                        "duplicate_event"
                 }
 
 
         # ====================================================
-        # LOCALIZAR PAGAMENTO
+        # PAGAMENTO
         # ====================================================
 
-        pagamento = conn.execute(
-            """
-            SELECT
-                dominipay_id,
-                telegram_id,
-                amount_cents,
-                status,
-                credited
+        pagamento = (
+            _buscar_pagamento(
+                conn=conn,
 
-            FROM pix_payments
+                payment_id=
+                    payment_id,
 
-            WHERE dominipay_id = ?
-            """,
-            (payment_id,)
-        ).fetchone()
+                external_id=
+                    external_id,
+            )
+        )
 
 
         if not pagamento:
@@ -378,39 +638,68 @@ def processar_pagamento_webhook(
             conn.rollback()
 
             return {
-                "action": "payment_not_found"
+                "action":
+                    "payment_not_found"
             }
 
 
-        telegram_id = int(
-            pagamento["telegram_id"]
+        gateway_payment_id = str(
+            pagamento[
+                "gateway_payment_id"
+            ]
         )
+
+
+        telegram_id = int(
+            pagamento[
+                "telegram_id"
+            ]
+        )
+
 
         amount_cents = int(
-            pagamento["amount_cents"]
+            pagamento[
+                "amount_cents"
+            ]
         )
 
+
         credited = int(
-            pagamento["credited"]
+            pagamento[
+                "credited"
+            ]
         )
 
 
         # ====================================================
-        # CONFERIR VALOR
+        # CONFERÊNCIA DO VALOR
         # ====================================================
 
         if (
-            webhook_amount_cents is not None
-            and webhook_amount_cents != amount_cents
+            webhook_amount_cents
+            is not None
+
+            and webhook_amount_cents
+            != amount_cents
         ):
 
             conn.rollback()
 
             return {
-                "action": "amount_mismatch",
-                "expected": amount_cents,
-                "received": webhook_amount_cents,
+                "action":
+                    "amount_mismatch",
+
+                "expected":
+                    amount_cents,
+
+                "received":
+                    webhook_amount_cents,
             }
+
+
+        status_normalizado = (
+            str(status).lower()
+        )
 
 
         # ====================================================
@@ -423,80 +712,70 @@ def processar_pagamento_webhook(
 
             SET status = ?
 
-            WHERE dominipay_id = ?
+            WHERE gateway_payment_id = ?
             """,
+
             (
-                status,
-                payment_id,
-            )
+                status_normalizado,
+
+                gateway_payment_id,
+            ),
         )
 
 
         # ====================================================
-        # NÃO FOI APROVADO
+        # NÃO APROVADO
         # ====================================================
 
-        if status.lower() != "approved":
+        if (
+            status_normalizado
+            != "approved"
+        ):
 
             if event_id:
 
                 conn.execute(
                     """
-                    INSERT INTO webhook_events (
+                    INSERT OR IGNORE
+                    INTO webhook_events (
+
                         event_id,
+
                         payment_id,
+
                         event_type
                     )
+
                     VALUES (?, ?, ?)
                     """,
+
                     (
                         event_id,
-                        payment_id,
-                        status,
-                    )
+
+                        gateway_payment_id,
+
+                        status_normalizado,
+                    ),
                 )
+
 
             conn.commit()
 
+
             return {
-                "action": "status_updated",
-                "status": status,
+                "action":
+                    "status_updated",
+
+                "status":
+                    status_normalizado,
             }
 
 
         # ====================================================
-        # JÁ FOI CREDITADO?
-        #
-        # Isso impede:
-        #
-        # webhook 1 -> +10
-        # webhook 2 -> +10
-        # webhook 3 -> +10
-        #
-        # Macaco NÃO imprime dinheiro infinito.
+        # JÁ CREDITADO
         # ====================================================
 
         if credited == 1:
-
-            if event_id:
-
-                conn.execute(
-                    """
-                    INSERT INTO webhook_events (
-                        event_id,
-                        payment_id,
-                        event_type
-                    )
-                    VALUES (?, ?, ?)
-                    """,
-                    (
-                        event_id,
-                        payment_id,
-                        status,
-                    )
-                )
-
-            conn.commit()
 
             saldo = conn.execute(
                 """
@@ -506,17 +785,56 @@ def processar_pagamento_webhook(
 
                 WHERE telegram_id = ?
                 """,
-                (telegram_id,)
+
+                (telegram_id,),
             ).fetchone()
 
+
+            if event_id:
+
+                conn.execute(
+                    """
+                    INSERT OR IGNORE
+                    INTO webhook_events (
+
+                        event_id,
+
+                        payment_id,
+
+                        event_type
+                    )
+
+                    VALUES (?, ?, ?)
+                    """,
+
+                    (
+                        event_id,
+
+                        gateway_payment_id,
+
+                        "payment.confirmed",
+                    ),
+                )
+
+
+            conn.commit()
+
+
             return {
-                "action": "already_credited",
-                "telegram_id": telegram_id,
-                "balance_cents": (
-                    int(saldo["balance_cents"])
+                "action":
+                    "already_credited",
+
+                "telegram_id":
+                    telegram_id,
+
+                "balance_cents":
+                    int(
+                        saldo[
+                            "balance_cents"
+                        ]
+                    )
                     if saldo
-                    else 0
-                ),
+                    else 0,
             }
 
 
@@ -526,12 +844,15 @@ def processar_pagamento_webhook(
 
         conn.execute(
             """
-            INSERT OR IGNORE INTO users (
+            INSERT OR IGNORE
+            INTO users (
                 telegram_id
             )
+
             VALUES (?)
             """,
-            (telegram_id,)
+
+            (telegram_id,),
         )
 
 
@@ -544,20 +865,25 @@ def processar_pagamento_webhook(
             UPDATE users
 
             SET
-                balance_cents = balance_cents + ?,
-                updated_at = CURRENT_TIMESTAMP
+                balance_cents =
+                    balance_cents + ?,
+
+                updated_at =
+                    CURRENT_TIMESTAMP
 
             WHERE telegram_id = ?
             """,
+
             (
                 amount_cents,
+
                 telegram_id,
-            )
+            ),
         )
 
 
         # ====================================================
-        # MARCAR PAGAMENTO COMO CREDITADO
+        # MARCAR PIX COMO CREDITADO
         # ====================================================
 
         conn.execute(
@@ -565,41 +891,56 @@ def processar_pagamento_webhook(
             UPDATE pix_payments
 
             SET
-                credited = 1,
-                status = 'approved',
-                paid_at = CURRENT_TIMESTAMP
 
-            WHERE dominipay_id = ?
+                credited = 1,
+
+                status = 'approved',
+
+                paid_at =
+                    CURRENT_TIMESTAMP
+
+            WHERE gateway_payment_id = ?
             """,
-            (payment_id,)
+
+            (
+                gateway_payment_id,
+            ),
         )
 
 
         # ====================================================
-        # SALVAR EVENTO
+        # EVENTO
         # ====================================================
 
         if event_id:
 
             conn.execute(
                 """
-                INSERT INTO webhook_events (
+                INSERT OR IGNORE
+                INTO webhook_events (
+
                     event_id,
+
                     payment_id,
+
                     event_type
                 )
+
                 VALUES (?, ?, ?)
                 """,
+
                 (
                     event_id,
-                    payment_id,
-                    "payment.status_changed",
-                )
+
+                    gateway_payment_id,
+
+                    "payment.confirmed",
+                ),
             )
 
 
         # ====================================================
-        # PEGAR NOVO SALDO
+        # NOVO SALDO
         # ====================================================
 
         saldo = conn.execute(
@@ -610,7 +951,8 @@ def processar_pagamento_webhook(
 
             WHERE telegram_id = ?
             """,
-            (telegram_id,)
+
+            (telegram_id,),
         ).fetchone()
 
 
@@ -623,7 +965,8 @@ def processar_pagamento_webhook(
 
 
         return {
-            "action": "credited",
+            "action":
+                "credited",
 
             "telegram_id":
                 telegram_id,
@@ -633,6 +976,9 @@ def processar_pagamento_webhook(
 
             "balance_cents":
                 novo_saldo,
+
+            "payment_id":
+                gateway_payment_id,
         }
 
 
